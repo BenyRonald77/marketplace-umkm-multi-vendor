@@ -190,3 +190,84 @@ export async function getKomisiPersen(): Promise<number> {
   const v = Number(c?.value ?? "5");
   return Number.isFinite(v) && v >= 0 ? v : 5;
 }
+
+/**
+ * Pembayaran tunggal: pembeli membayar satu tagihan (order).
+ * Setelah dikonfirmasi, dana dibagi ke saldo tiap vendor:
+ *   komisi      = round((subtotalItem + ongkir) x pct / 100)  -> ledger platform
+ *   bersihVendor = subtotalItem + ongkir - komisi             -> ledger vendor
+ * Sub-order yang sudah dibatalkan sebelum bayar tidak ikut dihitung.
+ */
+export async function bayarOrder(orderId: number, metode = "transfer") {
+  const order = await prisma.order.findUnique({
+    where: { id: orderId },
+    include: { subOrders: { orderBy: { id: "asc" } } },
+  });
+  if (!order) throw new BizError(404, "order tidak ditemukan");
+  if (order.status !== "menunggu_pembayaran")
+    throw new BizError(409, `order sudah berstatus "${order.status}"`);
+
+  const aktif = order.subOrders.filter((s) => s.status !== "dibatalkan");
+  if (aktif.length === 0) throw new BizError(422, "semua sub-order sudah dibatalkan");
+
+  const pct = await getKomisiPersen();
+  const totalBayar = aktif.reduce((s, x) => s + x.subtotalItem + x.ongkir, 0);
+  let totalKomisi = 0;
+
+  for (const s of aktif) {
+    const bruto = s.subtotalItem + s.ongkir;
+    const komisi = Math.round((bruto * pct) / 100);
+    const bersih = bruto - komisi;
+    totalKomisi += komisi;
+
+    await prisma.subOrder.update({
+      where: { id: s.id },
+      data: { komisi, bersihVendor: bersih, dibayar: true },
+    });
+    await prisma.vendorLedger.create({
+      data: {
+        tokoId: s.tokoId,
+        subOrderId: s.id,
+        jenis: "kredit_penjualan",
+        jumlah: bersih,
+        keterangan: `Penjualan ${order.kode} (komisi ${pct}%)`,
+        createdAt: nowISO(),
+      },
+    });
+    await prisma.platformLedger.create({
+      data: {
+        subOrderId: s.id,
+        jenis: "komisi",
+        jumlah: komisi,
+        keterangan: `Komisi ${pct}% dari ${order.kode} (toko #${s.tokoId})`,
+        createdAt: nowISO(),
+      },
+    });
+  }
+
+  await prisma.pembayaran.create({
+    data: { orderId, jumlah: totalBayar, metode, createdAt: nowISO() },
+  });
+  await prisma.order.update({
+    where: { id: orderId },
+    data: { status: "lunas", total: totalBayar },
+  });
+
+  return {
+    orderId,
+    kode: order.kode,
+    totalBayar,
+    totalKomisi,
+    komisiPersen: pct,
+    subOrderDibayar: aktif.length,
+  };
+}
+
+/** Saldo vendor = jumlah semua mutasi ledger vendor (derived). */
+export async function saldoToko(tokoId: number): Promise<number> {
+  const agg = await prisma.vendorLedger.aggregate({
+    where: { tokoId },
+    _sum: { jumlah: true },
+  });
+  return agg._sum.jumlah ?? 0;
+}
