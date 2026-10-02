@@ -271,3 +271,87 @@ export async function saldoToko(tokoId: number): Promise<number> {
   });
   return agg._sum.jumlah ?? 0;
 }
+
+const TRANSISI: Record<string, string[]> = {
+  menunggu_bayar: ["diproses"],
+  diproses: ["dikirim"],
+  dikirim: ["selesai"],
+  selesai: [],
+  dibatalkan: [],
+};
+
+/** Maju satu langkah: menunggu_bayar -> diproses -> dikirim -> selesai. */
+export async function ubahStatusSubOrder(id: number, status: string) {
+  const s = await prisma.subOrder.findUnique({ where: { id } });
+  if (!s) throw new BizError(404, "sub-order tidak ditemukan");
+  if (status === "dibatalkan")
+    throw new BizError(400, "pembatalan lewat endpoint /batal");
+  const boleh = TRANSISI[s.status] ?? [];
+  if (!boleh.includes(status))
+    throw new BizError(409, `transisi status ${s.status} -> ${status} tidak diizinkan`);
+  return prisma.subOrder.update({ where: { id }, data: { status } });
+}
+
+/**
+ * Batalkan SATU sub-order tanpa mengganggu sub-order lain:
+ * - stok tiap item dikembalikan (increment),
+ * - bila sudah dibayar: ledger vendor dikoreksi (-bersihVendor) dan
+ *   ledger platform dikoreksi (-komisi),
+ * - bila order belum dibayar dan semua sub-order batal -> order ikut dibatalkan.
+ */
+export async function batalkanSubOrder(id: number) {
+  const s = await prisma.subOrder.findUnique({
+    where: { id },
+    include: { items: true, order: { select: { kode: true, status: true } } },
+  });
+  if (!s) throw new BizError(404, "sub-order tidak ditemukan");
+  if (s.status === "dibatalkan") throw new BizError(409, "sub-order sudah dibatalkan");
+  if (s.status === "selesai")
+    throw new BizError(409, "sub-order yang sudah selesai tidak bisa dibatalkan");
+
+  for (const it of s.items) {
+    await prisma.produk.updateMany({
+      where: { id: it.produkId },
+      data: { stok: { increment: it.qty } },
+    });
+  }
+
+  let koreksi = null;
+  if (s.dibayar) {
+    await prisma.vendorLedger.create({
+      data: {
+        tokoId: s.tokoId,
+        subOrderId: s.id,
+        jenis: "koreksi_batal",
+        jumlah: -s.bersihVendor,
+        keterangan: `Koreksi pembatalan ${s.order.kode}`,
+        createdAt: nowISO(),
+      },
+    });
+    await prisma.platformLedger.create({
+      data: {
+        subOrderId: s.id,
+        jenis: "koreksi_batal",
+        jumlah: -s.komisi,
+        keterangan: `Koreksi komisi pembatalan ${s.order.kode}`,
+        createdAt: nowISO(),
+      },
+    });
+    koreksi = { saldoVendor: -s.bersihVendor, komisi: -s.komisi };
+  }
+
+  const updated = await prisma.subOrder.update({
+    where: { id },
+    data: { status: "dibatalkan", dibayar: false },
+  });
+
+  const sisa = await prisma.subOrder.count({
+    where: { orderId: s.orderId, status: { not: "dibatalkan" } },
+  });
+  let orderBatal = false;
+  if (sisa === 0 && s.order.status === "menunggu_pembayaran") {
+    await prisma.order.update({ where: { id: s.orderId }, data: { status: "dibatalkan" } });
+    orderBatal = true;
+  }
+  return { subOrder: updated, koreksi, orderIkutBatal: orderBatal };
+}

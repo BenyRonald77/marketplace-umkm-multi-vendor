@@ -46,6 +46,18 @@ export default function PesananPage() {
     }
   };
 
+  const batal = async (subOrderId: number) => {
+    if (!confirm("Batalkan sub-order ini? Stok akan dikembalikan.")) return;
+    setMsg("");
+    const r = await fetch(`/api/suborder/${subOrderId}/batal`, { method: "POST" });
+    const j = await r.json();
+    if (!r.ok) setMsg("Gagal batal: " + (j.error || r.status));
+    else {
+      setMsg(`✓ Sub-order #${subOrderId} dibatalkan, stok dikembalikan`);
+      muat(pembeliId);
+    }
+  };
+
   const badge = (st: string, map: Record<string, string>) => (
     <span className={`rounded-full px-2 py-0.5 text-xs font-semibold ${
       st === "dibatalkan" ? "bg-red-100 text-red-700"
@@ -84,7 +96,17 @@ export default function PesananPage() {
                 <div key={s.id} className="rounded-lg border border-slate-200 p-3">
                   <div className="flex flex-wrap items-center justify-between gap-2">
                     <p className="font-semibold">🏪 {s.toko.nama}</p>
-                    {badge(s.status, STATUS_SUBORDER)}
+                    <div className="flex items-center gap-2">
+                      {badge(s.status, STATUS_SUBORDER)}
+                      {s.status !== "dibatalkan" && s.status !== "selesai" && (
+                        <button
+                          onClick={() => batal(s.id)}
+                          className="rounded border border-red-300 px-2 py-0.5 text-xs font-semibold text-red-600"
+                        >
+                          Batalkan
+                        </button>
+                      )}
+                    </div>
                   </div>
                   <ul className="mt-1 text-sm text-slate-600">
                     {s.items.map((it) => (
