@@ -1,0 +1,133 @@
+// Schema database Marketplace UMKM Multi-Vendor
+// SQLite + Prisma 5.22. Tanggal sebagai TEXT ISO.
+
+datasource db {
+  provider = "sqlite"
+  url      = env("DATABASE_URL")
+}
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+model Toko {
+  id          Int      @id @default(autoincrement())
+  nama        String
+  deskripsi   String   @default("")
+  pemilik     String
+  statusAktif Boolean  @default(true)
+  tarifOngkir Int      @default(10000) // flat per sub-order
+  createdAt   String
+  produks     Produk[]
+  subOrders   SubOrder[]
+  mutasi      VendorLedger[]
+}
+
+model Produk {
+  id             Int             @id @default(autoincrement())
+  tokoId         Int
+  toko           Toko            @relation(fields: [tokoId], references: [id])
+  nama           String
+  harga          Int
+  stok           Int             @default(0)
+  kategori       String          @default("Lainnya")
+  statusAktif    Boolean         @default(true)
+  createdAt      String
+  keranjangItems KeranjangItem[]
+  orderItems     OrderItem[]
+}
+
+model Pembeli {
+  id             Int             @id @default(autoincrement())
+  nama           String
+  email          String          @unique
+  createdAt      String
+  keranjangItems KeranjangItem[]
+  orders         Order[]
+}
+
+model KeranjangItem {
+  id        Int     @id @default(autoincrement())
+  pembeliId Int
+  pembeli   Pembeli @relation(fields: [pembeliId], references: [id])
+  produkId  Int
+  produk    Produk  @relation(fields: [produkId], references: [id])
+  qty       Int
+
+  @@unique([pembeliId, produkId])
+}
+
+model Order {
+  id          Int          @id @default(autoincrement())
+  kode        String       @unique
+  pembeliId   Int
+  pembeli     Pembeli      @relation(fields: [pembeliId], references: [id])
+  total       Int          // grand total: semua subtotal item + semua ongkir
+  ongkirTotal Int
+  status      String       @default("menunggu_pembayaran") // menunggu_pembayaran | lunas | dibatalkan
+  createdAt   String
+  subOrders   SubOrder[]
+  pembayarans Pembayaran[]
+}
+
+model SubOrder {
+  id           Int         @id @default(autoincrement())
+  orderId      Int
+  order        Order       @relation(fields: [orderId], references: [id])
+  tokoId       Int
+  toko         Toko        @relation(fields: [tokoId], references: [id])
+  ongkir       Int         // tarif flat vendor ini
+  subtotalItem Int
+  komisi       Int         @default(0)  // komisi platform atas sub-order ini (diisi saat lunas)
+  bersihVendor Int         @default(0)  // dana masuk saldo vendor (diisi saat lunas)
+  dibayar      Boolean     @default(false)
+  status       String      @default("menunggu_bayar") // menunggu_bayar | diproses | dikirim | selesai | dibatalkan
+  createdAt    String
+  items        OrderItem[]
+}
+
+model OrderItem {
+  id          Int      @id @default(autoincrement())
+  subOrderId  Int
+  subOrder    SubOrder @relation(fields: [subOrderId], references: [id])
+  produkId    Int
+  produk      Produk   @relation(fields: [produkId], references: [id])
+  namaProduk  String   // snapshot nama saat checkout
+  qty         Int
+  hargaSatuan Int      // snapshot harga saat checkout
+  subtotal    Int
+}
+
+model VendorLedger {
+  id         Int     @id @default(autoincrement())
+  tokoId     Int
+  toko       Toko    @relation(fields: [tokoId], references: [id])
+  subOrderId Int?
+  jenis      String  // kredit_penjualan | koreksi_batal
+  jumlah     Int     // signed: positif masuk, negatif keluar
+  keterangan String  @default("")
+  createdAt  String
+}
+
+model PlatformLedger {
+  id         Int     @id @default(autoincrement())
+  subOrderId Int?
+  jenis      String  // komisi | koreksi_batal
+  jumlah     Int     // signed
+  keterangan String  @default("")
+  createdAt  String
+}
+
+model Pembayaran {
+  id        Int    @id @default(autoincrement())
+  orderId   Int
+  order     Order  @relation(fields: [orderId], references: [id])
+  jumlah    Int
+  metode    String @default("transfer")
+  createdAt String
+}
+
+model Config {
+  key   String @id
+  value String
+}
